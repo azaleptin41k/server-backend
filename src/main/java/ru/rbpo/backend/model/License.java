@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+/** Лицензия (активационный ключ, продукт, тип, владелец, даты, лимит устройств). Таблица license. */
 @Entity
 @Table(name = "license")
 public class License {
@@ -28,6 +29,7 @@ public class License {
     @JoinColumn(name = "owner_id", nullable = false)
     private User owner;
 
+    /** Кто активировал; null = ещё ни разу не активировали (только owner при создании). Первая активация = это поле было null. */
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "user_id")
     private User user;
@@ -35,6 +37,7 @@ public class License {
     @Column(name = "first_activation_date")
     private Instant firstActivationDate;
 
+    /** null до первой активации; после активации обычно задана. Если null при уже заданном user — продление выставляет срок заново. */
     @Column(name = "ending_date")
     private Instant endingDate;
 

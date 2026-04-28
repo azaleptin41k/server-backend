@@ -9,10 +9,12 @@ import ru.rbpo.backend.exception.LicenseForbiddenException;
 import ru.rbpo.backend.exception.ResourceNotFoundException;
 import ru.rbpo.backend.model.*;
 import ru.rbpo.backend.repository.*;
+import ru.rbpo.backend.signature.SignatureService;
 
 import java.time.Instant;
 import java.util.UUID;
 
+/** Лицензии: создание, активация по ключу+устройству, проверка по device+product, продление. Тикет с ЭЦП через SignatureService. */
 @Service
 public class LicenseService {
 
@@ -23,12 +25,12 @@ public class LicenseService {
     private final DeviceRepository deviceRepository;
     private final DeviceLicenseRepository deviceLicenseRepository;
     private final LicenseHistoryRepository licenseHistoryRepository;
-    private final TicketSigner ticketSigner;
+    private final SignatureService signatureService;
 
     @Value("${license.ticket-ttl-seconds:3600}")
     private long ticketTtlSeconds;
 
-    /** Дней до истечения, при которых разрешено продление (по методичке: истекает <= 7 дней или неактивна) */
+    /** Продление разрешено за 7 дней до истечения или при неактивной лицензии (методичка). */
     private static final int RENEW_WITHIN_DAYS = 7;
 
     public LicenseService(ProductRepository productRepository,
@@ -38,7 +40,7 @@ public class LicenseService {
                           DeviceRepository deviceRepository,
                           DeviceLicenseRepository deviceLicenseRepository,
                           LicenseHistoryRepository licenseHistoryRepository,
-                          TicketSigner ticketSigner) {
+                          SignatureService signatureService) {
         this.productRepository = productRepository;
         this.licenseTypeRepository = licenseTypeRepository;
         this.licenseRepository = licenseRepository;
@@ -46,7 +48,7 @@ public class LicenseService {
         this.deviceRepository = deviceRepository;
         this.deviceLicenseRepository = deviceLicenseRepository;
         this.licenseHistoryRepository = licenseHistoryRepository;
-        this.ticketSigner = ticketSigner;
+        this.signatureService = signatureService;
     }
 
     @Transactional
@@ -114,7 +116,7 @@ public class LicenseService {
             throw new LicenseForbiddenException("Устройство принадлежит другому пользователю");
         }
 
-        boolean firstActivation = (license.getUser() == null);
+        boolean firstActivation = isFirstActivation(license);
 
         if (firstActivation) {
             license.setUser(userRepository.getReferenceById(userId));
@@ -219,6 +221,11 @@ public class LicenseService {
         return buildTicketResponse(license, null);
     }
 
+    /** Первая активация: после создания лицензии поле user ещё null (не привязан активировавший пользователь). */
+    private static boolean isFirstActivation(License license) {
+        return license.getUser() == null;
+    }
+
     private TicketResponse buildTicketResponse(License license, Device device) {
         Ticket ticket = new Ticket();
         Instant now = Instant.now();
@@ -229,7 +236,7 @@ public class LicenseService {
         ticket.setUserId(license.getUser() != null ? license.getUser().getId() : null);
         ticket.setDeviceId(device != null ? device.getId() : null);
         ticket.setBlocked(license.isBlocked());
-        String signature = ticketSigner.sign(ticket);
+        String signature = signatureService.signTicket(ticket);
         return new TicketResponse(ticket, signature);
     }
 
