@@ -1,0 +1,16 @@
+.git
+.github
+.gradle
+build
+.idea
+.vscode
+*.iml
+postman
+scripts
+*.md
+# Секреты не должны попадать в контекст сборки
+.env
+.env.*
+*.jks
+*.p12
+*.pem
