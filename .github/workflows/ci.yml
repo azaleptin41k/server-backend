@@ -1,59 +1,206 @@
-name: CI Pipeline
+name: CI & Security Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
+
+permissions:
+  contents: read
 
 env:
-  JAVA_VERSION: '21'
+  JAVA_VERSION: "21"
+  IMAGE_NAME: rbpo-backend
+
+# Все actions закреплены по SHA коммита (защита от перезаписи тегов, см. GHSA-69fq-xp46-6x23).
 
 jobs:
-  build-and-test:
-    name: Test and Build
+  # ── 1. Secret Scan — блокирует при найденном секрете ──────────────────────
+  secret-scan:
+    name: Secret Scan (Gitleaks)
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up JDK ${{ env.JAVA_VERSION }}
-        uses: actions/setup-java@v4
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── 2. Tests & Build ──────────────────────────────────────────────────────
+  test-build:
+    name: Tests & Build (Gradle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           java-version: ${{ env.JAVA_VERSION }}
-          distribution: 'temurin'
-          cache: 'gradle'
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+          distribution: temurin
+          cache: gradle
 
       - name: Run tests
-        run: ./gradlew test
-
-      - name: Build (skip tests, already run)
-        run: ./gradlew clean build -x test
+        run: chmod +x gradlew && ./gradlew --no-daemon test
 
       - name: Build JAR
-        run: ./gradlew bootJar
-        env:
-          SSL_ENABLED: 'false'
+        run: ./gradlew --no-daemon bootJar
 
-      - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload JAR
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: rbpo-backend-app
+          name: rbpo-backend-jar
           path: build/libs/*.jar
-          retention-days: 30
+          retention-days: 14
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-results
           path: build/test-results/
-          retention-days: 7
           if-no-files-found: ignore
+
+  # ── 3. SAST — Semgrep ─────────────────────────────────────────────────────
+  # Отчёт по всем находкам уходит в GitHub Security; блокируют только ERROR.
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Semgrep report (SARIF)
+        run: semgrep scan --config=p/java --config=p/owasp-top-ten --metrics=off --sarif --output=semgrep.sarif || true
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Semgrep gate (ERROR severity)
+        run: semgrep scan --config=p/java --config=p/owasp-top-ten --metrics=off --severity=ERROR --error
+
+  # ── 4. Container: Build, Trivy (image + Dockerfile), SBOM ─────────────────
+  container-security:
+    name: Docker Build, Scan (Trivy) & SBOM (Syft)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build -t ${{ env.IMAGE_NAME }}:${{ github.sha }} .
+
+      - name: Trivy image report (SARIF)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Trivy image gate (fixable CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Trivy config gate (Dockerfile misconfigurations)
+        if: always()
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - name: SBOM (Syft, SPDX)
+        if: always()
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          artifact-name: sbom-rbpo-backend.spdx.json
+          format: spdx-json
+
+  # ── 5. Publish & Sign (только main, после всех проверок) ──────────────────
+  publish-and-sign:
+    name: Publish to GHCR & Sign (cosign)
+    runs-on: ubuntu-latest
+    needs: [secret-scan, test-build, sast, container-security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        id: push
+        run: |
+          IMAGE=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          docker build -t "$IMAGE:${{ github.sha }}" .
+          docker push "$IMAGE:${{ github.sha }}"
+          echo "ref=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:${{ github.sha }}")" >> "$GITHUB_OUTPUT"
+
+      - name: Sign image by digest (keyless)
+        run: cosign sign --yes "${{ steps.push.outputs.ref }}"
+
+  # ── 6. Security Gate — одна обязательная проверка для branch protection ──
+  security-gate:
+    name: Security Gate
+    runs-on: ubuntu-latest
+    needs: [secret-scan, test-build, sast, container-security]
+    if: always()
+    steps:
+      - name: Check all jobs
+        run: |
+          echo "Secrets:   ${{ needs.secret-scan.result }}"
+          echo "Tests:     ${{ needs.test-build.result }}"
+          echo "SAST:      ${{ needs.sast.result }}"
+          echo "Container: ${{ needs.container-security.result }}"
+          if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
+            echo "❌ Security gate failed"; exit 1
+          fi
+          echo "✅ All checks passed"
