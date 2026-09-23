@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: rbpodb
       POSTGRES_USER: rbpo
-      POSTGRES_PASSWORD: rbpo
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-rbpo}   # локальный дефолт; в реальном окружении — свой пароль
     ports:
       - "5434:5432"
     volumes:
@@ -15,6 +15,35 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # Приложение в контейнере: docker compose --profile full up -d --build
+  # Нужны JWT_SECRET (в .env или окружении) и signing.jks в корне проекта
+  # (./scripts/create-signing-keystore.sh ./signing.jks).
+  app:
+    profiles: ["full"]
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/rbpodb
+      DB_USERNAME: rbpo
+      DB_PASSWORD: ${DB_PASSWORD:-rbpo}
+      JWT_SECRET: ${JWT_SECRET:?задайте JWT_SECRET (минимум 32 символа)}
+      DEMO_USERS_ENABLED: "true"   # демо-стенд; в реальном окружении не включать
+      SIGNING_KEYSTORE_PATH: file:/run/secrets/signing.jks
+      SIGNING_KEYSTORE_PASSWORD: ${SIGNING_KEYSTORE_PASSWORD:-changeit}
+    volumes:
+      - ./signing.jks:/run/secrets/signing.jks:ro
+    ports:
+      - "8081:8081"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   rbpo_backend_pgdata:
