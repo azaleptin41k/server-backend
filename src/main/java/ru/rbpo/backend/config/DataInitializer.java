@@ -1,5 +1,6 @@
 package ru.rbpo.backend.config;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
@@ -13,7 +14,10 @@ import ru.rbpo.backend.repository.ProductRepository;
 import ru.rbpo.backend.repository.UserRepository;
 
 /**
- * Создаёт тестовых пользователей при первом запуске (как в music-streaming).
+ * Заполняет справочники (продукт, типы лицензий) при первом запуске.
+ * Демо-пользователи с известными паролями создаются только при demo.users.enabled=true
+ * (профиль local и docker compose --profile full). В остальных окружениях их нет:
+ * иначе при каждом старте сбрасывался бы пароль администратора на известный.
  */
 @Component
 public class DataInitializer implements CommandLineRunner {
@@ -22,6 +26,9 @@ public class DataInitializer implements CommandLineRunner {
     private final PasswordEncoder passwordEncoder;
     private final ProductRepository productRepository;
     private final LicenseTypeRepository licenseTypeRepository;
+
+    @Value("${demo.users.enabled:false}")
+    private boolean demoUsersEnabled;
 
     public DataInitializer(UserRepository userRepository, PasswordEncoder passwordEncoder,
                            ProductRepository productRepository, LicenseTypeRepository licenseTypeRepository) {
@@ -34,33 +41,35 @@ public class DataInitializer implements CommandLineRunner {
     @Override
     @Transactional
     public void run(String... args) {
-        userRepository.findByUsername("admin").ifPresentOrElse(
-                admin -> {
-                    admin.setPassword(passwordEncoder.encode("Admin123!@#"));
-                    admin.setRole(Role.ADMIN);
-                    admin.setEmail("admin@example.com");
-                    admin.setFirstName("Admin");
-                    admin.setLastName("User");
-                    userRepository.save(admin);
-                },
-                () -> userRepository.save(new User(
-                        "Admin", "User", "admin@example.com",
-                        "admin", passwordEncoder.encode("Admin123!@#"), Role.ADMIN))
-        );
+        if (demoUsersEnabled) {
+            userRepository.findByUsername("admin").ifPresentOrElse(
+                    admin -> {
+                        admin.setPassword(passwordEncoder.encode("Admin123!@#"));
+                        admin.setRole(Role.ADMIN);
+                        admin.setEmail("admin@example.com");
+                        admin.setFirstName("Admin");
+                        admin.setLastName("User");
+                        userRepository.save(admin);
+                    },
+                    () -> userRepository.save(new User(
+                            "Admin", "User", "admin@example.com",
+                            "admin", passwordEncoder.encode("Admin123!@#"), Role.ADMIN))
+            );
 
-        userRepository.findByUsername("testuser").ifPresentOrElse(
-                testUser -> {
-                    testUser.setPassword(passwordEncoder.encode("Test123!@#"));
-                    testUser.setRole(Role.USER);
-                    testUser.setEmail("user@example.com");
-                    testUser.setFirstName("Test");
-                    testUser.setLastName("User");
-                    userRepository.save(testUser);
-                },
-                () -> userRepository.save(new User(
-                        "Test", "User", "user@example.com",
-                        "testuser", passwordEncoder.encode("Test123!@#"), Role.USER))
-        );
+            userRepository.findByUsername("testuser").ifPresentOrElse(
+                    testUser -> {
+                        testUser.setPassword(passwordEncoder.encode("Test123!@#"));
+                        testUser.setRole(Role.USER);
+                        testUser.setEmail("user@example.com");
+                        testUser.setFirstName("Test");
+                        testUser.setLastName("User");
+                        userRepository.save(testUser);
+                    },
+                    () -> userRepository.save(new User(
+                            "Test", "User", "user@example.com",
+                            "testuser", passwordEncoder.encode("Test123!@#"), Role.USER))
+            );
+        }
 
         if (productRepository.count() == 0) {
             Product p = new Product();
