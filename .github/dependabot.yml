@@ -12,6 +12,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Мажорные обновления (Spring Boot 4, Gradle 9) требуют миграции — делаются вручную
+    ignore:
+      - dependency-name: "org.springframework.boot"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "gradle-wrapper"
+        update-types: ["version-update:semver-major"]
     groups:
       gradle-minor-patch:
         update-types: ["minor", "patch"]
@@ -19,3 +25,7 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Java остаётся на LTS 21 (как в distroless java21 и в CI); переход на новую LTS — вручную
+    ignore:
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
