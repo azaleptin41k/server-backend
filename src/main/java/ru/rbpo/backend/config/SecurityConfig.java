@@ -56,7 +56,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/me").hasAnyRole("USER", "ADMIN")
                         .requestMatchers(HttpMethod.POST, "/api/licenses").hasRole("ADMIN")
                         .requestMatchers("/api/licenses/**").hasAnyRole("USER", "ADMIN")
-                        .requestMatchers("/actuator/health").permitAll()
+                        .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint(jsonAuthEntryPoint())
