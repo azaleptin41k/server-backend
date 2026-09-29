@@ -1,0 +1,114 @@
+{{- $dbHost := printf "%s-postgres" (include "rbpo.fullname" .) -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rbpo.fullname" . }}
+  labels:
+    {{- include "rbpo.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "rbpo.appSelector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "rbpo.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: {{ include "rbpo.fullname" . }}
+      automountServiceAccountToken: false   # приложению не нужен доступ к API Kubernetes
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532                    # пользователь nonroot в distroless
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if .Values.postgres.enabled }}
+      initContainers:
+        # Ждём готовности БД, чтобы приложение не уходило в CrashLoopBackOff при старте
+        - name: wait-for-db
+          image: {{ .Values.postgres.image }}
+          command: ["sh", "-c", "until pg_isready -h {{ $dbHost }} -p 5432 -t 2; do echo waiting for db; sleep 2; done"]
+          securityContext:
+            {{- include "rbpo.containerSecurityContext" . | nindent 12 }}
+            runAsUser: 70
+            runAsGroup: 70
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+      {{- end }}
+      containers:
+        - name: api
+          image: {{ include "rbpo.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8081
+          env:
+            - name: DB_URL
+              value: {{ if .Values.postgres.enabled }}{{ printf "jdbc:postgresql://%s:5432/%s" $dbHost .Values.postgres.database | quote }}{{ else }}{{ .Values.externalDatabase.url | quote }}{{ end }}
+            - name: DB_USERNAME
+              value: {{ if .Values.postgres.enabled }}{{ .Values.postgres.username | quote }}{{ else }}{{ .Values.externalDatabase.username | quote }}{{ end }}
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rbpo.secretName" . }}
+                  key: DB_PASSWORD
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rbpo.secretName" . }}
+                  key: JWT_SECRET
+            - name: SIGNING_KEYSTORE_PATH
+              value: file:/run/secrets/signing/signing.jks
+            - name: SIGNING_KEYSTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "rbpo.secretName" . }}
+                  key: SIGNING_KEYSTORE_PASSWORD
+            - name: DEMO_USERS_ENABLED
+              value: {{ .Values.env.demoUsersEnabled | quote }}
+            - name: JAVA_TOOL_OPTIONS
+              value: {{ .Values.env.javaOpts | quote }}
+          securityContext:
+            {{- include "rbpo.containerSecurityContext" . | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36          # до 3 минут на старт Spring
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp                 # корневая ФС read-only, Tomcat пишет во /tmp
+            - name: signing-key
+              mountPath: /run/secrets/signing
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: signing-key
+          secret:
+            secretName: {{ include "rbpo.secretName" . }}
+            defaultMode: 0440
+            items:
+              - key: signing.jks
+                path: signing.jks

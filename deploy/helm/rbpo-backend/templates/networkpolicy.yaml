@@ -1,0 +1,80 @@
+{{- if .Values.networkPolicy.enabled }}
+# 1. Запрет по умолчанию: всё входящее и исходящее для подов релиза
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rbpo.fullname" . }}-default-deny
+  labels:
+    {{- include "rbpo.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Ingress", "Egress"]
+---
+# 2. Приложение: вход только с разрешённых источников, выход — только в БД и DNS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rbpo.fullname" . }}-api
+  labels:
+    {{- include "rbpo.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "rbpo.appSelector" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - port: 8081
+      {{- with .Values.networkPolicy.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    {{- if .Values.postgres.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "rbpo.dbSelector" . | nindent 14 }}
+      ports:
+        - port: 5432
+    {{- else }}
+    - ports:
+        - port: 5432
+    {{- end }}
+{{- if .Values.postgres.enabled }}
+---
+# 3. БД: вход только от приложения на 5432, исходящий трафик не нужен
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rbpo.fullname" . }}-postgres
+  labels:
+    {{- include "rbpo.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "rbpo.dbSelector" . | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "rbpo.appSelector" . | nindent 14 }}
+      ports:
+        - port: 5432
+{{- end }}
+{{- end }}
