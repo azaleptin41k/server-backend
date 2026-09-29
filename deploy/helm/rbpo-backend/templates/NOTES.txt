@@ -1,0 +1,6 @@
+rbpo-backend установлен в namespace {{ .Release.Namespace }}.
+
+Проверка:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "rbpo.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "rbpo.fullname" . }} 8081:{{ .Values.service.port }}
+  curl http://localhost:8081/actuator/health
