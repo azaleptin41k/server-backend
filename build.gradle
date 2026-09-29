@@ -1,7 +1,7 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '3.3.5'
-    id 'io.spring.dependency-management' version '1.1.6'
+    id 'org.springframework.boot' version '3.5.16'
+    id 'io.spring.dependency-management' version '1.1.7'
 }
 
 group = 'ru.rbpo'
@@ -15,6 +15,11 @@ java {
 repositories {
     mavenCentral()
 }
+
+// Версии поверх BOM Spring Boot: закрывают CVE, исправленные позже выхода 3.5.16
+// (найдены Trivy в CI). Убрать, когда Spring Boot подтянет эти версии сам.
+ext['tomcat.version'] = '10.1.60'      // CVE-2026-65182, CVE-2026-65905, CVE-2026-68525
+ext['postgresql.version'] = '42.7.13'  // CVE-2026-54291
 
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'

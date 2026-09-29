@@ -1,8 +1,10 @@
 # RBPO Backend
 
-Spring Boot, JWT (access/refresh), роли USER/ADMIN/GUEST, PostgreSQL.
+[![CI & Security Pipeline](https://github.com/azaleptin41k/server-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/azaleptin41k/server-backend/actions/workflows/ci.yml)
 
-Java 21, Spring Security, JPA, Gradle.
+API лицензирования: Spring Boot, JWT (access/refresh), роли USER/ADMIN/GUEST, PostgreSQL, подпись тикетов лицензий SHA256withRSA.
+
+Java 21, Spring Security, JPA, Gradle, Docker (distroless, non-root). Каждый коммит проходит security-пайплайн: Gitleaks, тесты, Semgrep, Trivy (образ и Dockerfile), SBOM; образ из `main` публикуется в GHCR и подписывается cosign.
 
 **Запуск**
 
@@ -51,7 +53,17 @@ chmod +x scripts/setup-db.sh && ./scripts/setup-db.sh
 | POST | `/api/licenses/check` | Проверка лицензии, тело: deviceMac, productId; ответ: TicketResponse |
 | POST | `/api/licenses/renew` | Продление лицензии, тело: activationKey; ответ: TicketResponse |
 
-Тестовые юзеры после старта: `admin` / `Admin123!@#`, `testuser` / `Test123!@#`.
+**Вариант C: приложение и БД в Docker**
+
+```bash
+./scripts/create-signing-keystore.sh ./signing.jks   # ключ подписи тикетов (в .gitignore)
+cp .env.example .env                                 # задать JWT_SECRET (от 32 символов)
+docker compose --profile full up -d --build
+```
+
+Контейнер приложения запускается от non-root пользователя, с read-only файловой системой, без Linux capabilities и с `no-new-privileges`. Ключ подписи монтируется только для чтения и в образ не попадает.
+
+**Демо-пользователи** `admin` / `Admin123!@#` и `testuser` / `Test123!@#` создаются только при `demo.users.enabled=true`: в профиле `local` и в `docker compose --profile full`. В остальных окружениях их нет.
 
 **Postman**
 
@@ -64,7 +76,38 @@ Import → `postman/rbpo-backend.postman_collection.json`. `baseUrl` = http://lo
 ./gradlew bootJar
 ```
 
-В CI на push в `main`/`develop` — тесты, сборка, артефакт JAR.
+## CI & Security Pipeline
+
+```
+push / pull request → main, develop
+  │
+  ├─ Secret Scan (Gitleaks)        — блокирует при найденном секрете (вся история)
+  ├─ Tests & Build (Gradle)        — тесты, JAR в артефакты
+  ├─ SAST (Semgrep)                — p/java + p/owasp-top-ten, SARIF в GitHub Security; блокируют ERROR
+  ├─ Container (Trivy + Syft)      — скан образа (блок: исправимые CRITICAL/HIGH),
+  │                                  скан Dockerfile на мисконфигурации, SBOM (SPDX)
+  ├─ Publish & Sign (только main)  — push в GHCR + keyless-подпись cosign
+  └─ Security Gate                 — единая обязательная проверка для защиты ветки
+```
+
+Все actions закреплены по SHA коммита, у `GITHUB_TOKEN` минимальные права. Dependabot еженедельно предлагает сгруппированные обновления actions, Gradle-зависимостей и базовых образов.
+
+Проверка подписи образа:
+
+```bash
+cosign verify ghcr.io/azaleptin41k/rbpo-backend@<digest> \
+  --certificate-identity-regexp 'https://github.com/azaleptin41k/server-backend/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+## Безопасность: что найдено при ревью и как исправлено
+
+| Проблема | Риск | Исправление |
+|---|---|---|
+| Секрет JWT по умолчанию в `application.properties` | Если `JWT_SECRET` не задан, приложение подписывает токены известным ключом: любой может выпустить себе токен ADMIN | Значения по умолчанию нет, без `JWT_SECRET` приложение не стартует. Секрет для разработки — только в профиле `local` |
+| Демо-пользователи создавались при каждом старте | Администратор с известным паролем в любом окружении; пароль сбрасывался при перезапуске | Создаются только при `demo.users.enabled=true` |
+| Текст исключений в ответах об ошибках (`include-message=always`) | Утечка внутренних деталей | `never` по умолчанию, `always` только в профиле `local` |
+| Keystore с паролем `changeit` | Слабый пароль ключа подписи | Keystore не хранится в репозитории и образе (`.gitignore`, `.dockerignore`), монтируется при запуске; в реальном окружении пароль и keystore передаются через секреты (`SIGNING_KEYSTORE_*`). `changeit` — только для локальной разработки |
 
 ---
 
