@@ -1,5 +1,5 @@
 # ── Stage 1: сборка ──────────────────────────────────────────────────────────
-FROM eclipse-temurin:21-jdk AS build
+FROM eclipse-temurin:25-jdk AS build
 WORKDIR /src
 
 # Сначала только файлы сборки — слой с зависимостями кэшируется
