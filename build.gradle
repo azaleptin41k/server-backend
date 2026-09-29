@@ -20,12 +20,14 @@ repositories {
 // (найдены Trivy в CI). Убрать, когда Spring Boot подтянет эти версии сам.
 ext['tomcat.version'] = '10.1.60'      // CVE-2026-65182, CVE-2026-65905, CVE-2026-68525
 ext['postgresql.version'] = '42.7.13'  // CVE-2026-54291
+ext['jackson-bom.version'] = '2.21.7'  // CVE-2026-68497 (jackson-databind), найдена Trivy после мержа
 
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
 
     implementation 'io.jsonwebtoken:jjwt-api:0.11.5'
     runtimeOnly 'io.jsonwebtoken:jjwt-impl:0.11.5'

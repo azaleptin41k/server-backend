@@ -76,6 +76,47 @@ Import → `postman/rbpo-backend.postman_collection.json`. `baseUrl` = http://lo
 ./gradlew bootJar
 ```
 
+## Kubernetes (Helm)
+
+Чарт: [`deploy/helm/rbpo-backend`](deploy/helm/rbpo-backend). Разворачивает API и PostgreSQL (StatefulSet с PVC) и проходит **Pod Security Standards `restricted`**: без root, read-only файловая система, без Linux capabilities, `seccompProfile: RuntimeDefault`, токен ServiceAccount не монтируется.
+
+| Что | Как сделано |
+|---|---|
+| Секреты | Не лежат в `values.yaml` и истории Helm: Secret создаётся заранее (`JWT_SECRET`, `DB_PASSWORD`, `SIGNING_KEYSTORE_PASSWORD`, `signing.jks`); keystore монтируется только для чтения |
+| Сеть | NetworkPolicy: всё запрещено по умолчанию; к API — только от ingress-контроллера, к БД — только от API, из API — только в БД и DNS |
+| Пробы | startup/liveness/readiness через Spring Boot Actuator (наружу отдаётся только `health`, без деталей) |
+| Ресурсы | requests/limits у всех контейнеров |
+| Образ | можно закрепить по digest (`image.digest`) — тем же, что подписан cosign |
+
+**CI (`.github/workflows/k8s.yml`):** `helm lint` → рендер манифестов → проверка схем `kubeconform` → Trivy на мисконфигурации → **реальный деплой в kind** в namespace с PSS `restricted` → smoke-тест (регистрация и логин через API) → проверка, что из чужого namespace PostgreSQL недоступен.
+
+**Локально в minikube** (bash / Git Bash / WSL):
+
+```bash
+minikube start --cni=calico                    # CNI с поддержкой NetworkPolicy
+eval $(minikube docker-env)                    # собирать образ сразу внутри minikube
+docker build -t rbpo-backend:local .
+
+kubectl create namespace rbpo
+kubectl label namespace rbpo pod-security.kubernetes.io/enforce=restricted
+
+./scripts/create-signing-keystore.sh ./signing.jks
+kubectl -n rbpo create secret generic rbpo-rbpo-backend-secrets \
+  --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
+  --from-literal=DB_PASSWORD="$(openssl rand -hex 16)" \
+  --from-literal=SIGNING_KEYSTORE_PASSWORD=changeit \
+  --from-file=signing.jks
+
+helm install rbpo deploy/helm/rbpo-backend -n rbpo \
+  --set image.repository=rbpo-backend --set image.tag=local --set image.pullPolicy=Never \
+  --set env.demoUsersEnabled=true --wait
+
+kubectl -n rbpo port-forward svc/rbpo-rbpo-backend 8081:8081
+curl http://localhost:8081/actuator/health
+```
+
+Полезно проверить руками: `kubectl -n rbpo get pods`, `kubectl -n rbpo describe pod <имя>`, `kubectl get networkpolicy -n rbpo`, а также попробовать убрать `runAsNonRoot` из чарта и увидеть, как admission PSS отклонит под.
+
 ## CI & Security Pipeline
 
 ```

@@ -1,0 +1,68 @@
+# ── Приложение ────────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/azaleptin41k/rbpo-backend
+  tag: ""            # по умолчанию appVersion чарта
+  digest: ""         # sha256:... — если задан, образ берётся по digest (как подписан cosign)
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Секреты НЕ задаются через values (иначе они окажутся в истории Helm и в git).
+# Создайте Secret заранее (см. README): ключи JWT_SECRET, DB_PASSWORD,
+# SIGNING_KEYSTORE_PASSWORD и файл signing.jks.
+existingSecret: ""   # по умолчанию <fullname>-secrets
+
+env:
+  demoUsersEnabled: false   # демо-пользователи с известными паролями — только для стенда
+  javaOpts: "-XX:MaxRAMPercentage=75"
+
+service:
+  type: ClusterIP
+  port: 8081
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 768Mi
+
+ingress:
+  enabled: false
+  className: nginx
+  host: rbpo.local
+  tls: []            # [{secretName: rbpo-tls, hosts: [rbpo.local]}]
+
+serviceAccount:
+  create: true
+
+# ── PostgreSQL внутри чарта (для стенда; в проде — управляемая БД) ───────────
+postgres:
+  enabled: true
+  image: postgres:17-alpine
+  database: rbpodb
+  username: rbpo
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+
+# Внешняя БД, если postgres.enabled=false
+externalDatabase:
+  url: ""            # jdbc:postgresql://host:5432/db
+  username: ""
+
+# ── Сетевые политики: по умолчанию всё запрещено, открыто только нужное ─────
+networkPolicy:
+  enabled: true
+  # Откуда разрешён входящий трафик к приложению (кроме port-forward)
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
