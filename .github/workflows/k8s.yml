@@ -1,0 +1,139 @@
+name: Kubernetes (Helm)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, feature/docker-devsecops]
+
+permissions:
+  contents: read
+
+env:
+  CHART: deploy/helm/rbpo-backend
+  HELM_VERSION: v3.22.0
+  KUBECONFORM_VERSION: v0.6.7
+  NAMESPACE: rbpo
+
+jobs:
+  # ── 1. Статическая проверка чарта ─────────────────────────────────────────
+  chart-lint:
+    name: Chart lint, schema & misconfig scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: helm lint
+        run: helm lint "$CHART" --strict
+
+      - name: Render manifests
+        run: helm template rbpo "$CHART" --namespace "$NAMESPACE" > rendered.yaml
+
+      - name: Validate against Kubernetes schemas (kubeconform)
+        run: |
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | tar xz kubeconform
+          ./kubeconform -strict -summary rendered.yaml
+
+      - name: Trivy misconfiguration gate (HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: config
+          scan-ref: deploy/helm
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rendered-manifests
+          path: rendered.yaml
+
+  # ── 2. Реальный деплой в kind ─────────────────────────────────────────────
+  # Namespace с Pod Security Standards "restricted": если поды нарушают
+  # требования (root, привилегии, запись в ФС), они не создадутся и деплой упадёт.
+  kind-deploy:
+    name: Deploy to kind & smoke test
+    runs-on: ubuntu-latest
+    needs: chart-lint
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
+        with:
+          cluster_name: ci
+
+      - name: Build image and load into kind
+        run: |
+          docker build -t rbpo-backend:ci .
+          kind load docker-image rbpo-backend:ci --name ci
+
+      - name: Namespace with Pod Security Standards "restricted"
+        run: |
+          kubectl create namespace "$NAMESPACE"
+          kubectl label namespace "$NAMESPACE" \
+            pod-security.kubernetes.io/enforce=restricted \
+            pod-security.kubernetes.io/warn=restricted
+
+      - name: Create secrets (generated, never stored)
+        run: |
+          keytool -genkeypair -alias app-signing -keyalg RSA -keysize 2048 -sigalg SHA256withRSA \
+            -keystore signing.jks -storetype JKS -storepass "$KS_PASS" -keypass "$KS_PASS" \
+            -validity 30 -dname "CN=CI" -noprompt
+          kubectl -n "$NAMESPACE" create secret generic rbpo-rbpo-backend-secrets \
+            --from-literal=JWT_SECRET="$(openssl rand -base64 48)" \
+            --from-literal=DB_PASSWORD="$(openssl rand -hex 16)" \
+            --from-literal=SIGNING_KEYSTORE_PASSWORD="$KS_PASS" \
+            --from-file=signing.jks
+          rm signing.jks
+        env:
+          KS_PASS: ci-keystore-pass
+
+      - name: helm install
+        run: |
+          helm install rbpo "$CHART" -n "$NAMESPACE" \
+            --set image.repository=rbpo-backend --set image.tag=ci --set image.pullPolicy=Never \
+            --wait --timeout 6m
+
+      - name: Smoke test (register + login through the API)
+        run: |
+          kubectl -n "$NAMESPACE" port-forward svc/rbpo-rbpo-backend 8081:8081 >/dev/null 2>&1 &
+          sleep 5
+          curl -fsS http://localhost:8081/actuator/health
+          echo
+          curl -fsS -X POST http://localhost:8081/api/auth/register -H 'Content-Type: application/json' \
+            -d '{"username":"ciuser","password":"Ci-pass-123!","email":"ci@example.com","firstName":"Ci","lastName":"User"}'
+          echo
+          curl -fsS -X POST http://localhost:8081/api/auth/login -H 'Content-Type: application/json' \
+            -d '{"username":"ciuser","password":"Ci-pass-123!"}' | grep -q accessToken
+          echo "Login OK: API работает и пишет в PostgreSQL"
+
+      - name: NetworkPolicy test (DB is not reachable from other pods)
+        run: |
+          kubectl create namespace netpol-test
+          kubectl -n netpol-test run probe --image=busybox:1.36 --restart=Never --command -- \
+            sh -c "nc -z -w 3 rbpo-rbpo-backend-postgres.${NAMESPACE}.svc.cluster.local 5432 && echo OPEN || echo BLOCKED"
+          kubectl -n netpol-test wait --for=jsonpath='{.status.phase}'=Succeeded pod/probe --timeout=90s
+          RESULT=$(kubectl -n netpol-test logs probe)
+          echo "Postgres from foreign namespace: $RESULT"
+          [ "$RESULT" = "BLOCKED" ]
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get all,networkpolicy,pvc -A
+          kubectl -n "$NAMESPACE" describe pods
+          kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp
+          kubectl -n "$NAMESPACE" logs -l app.kubernetes.io/component=api --all-containers --tail=200 || true
+          kubectl -n "$NAMESPACE" logs -l app.kubernetes.io/component=database --tail=100 || true
